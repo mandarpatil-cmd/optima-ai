@@ -1,0 +1,9 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+transformers==4.56.0
+torch==2.8.0+cpu
+torchaudio==2.8.0+cpu
+torchvision==0.23.0+cpu
+codecarbon==3.0.4
+python-multipart==0.0.9
+pydantic==2.11.7
