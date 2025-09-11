@@ -10,16 +10,17 @@ import hashlib
 from datetime import datetime
 
 # ✅ Absolute imports for backend modules
-from backend.agent_logic import AgentOrchestrator
 from backend.config import DB_PATH, EMAIL_CATEGORIES
 
 # Initialize the intelligent agent (with error handling)
 try:
+    # Import inside try so missing module doesn't crash startup
+    from backend.agent_logic import AgentOrchestrator  # type: ignore
     orchestrator = AgentOrchestrator()
     ORCHESTRATOR_READY = True
 except Exception as e:
     print(f"⚠ Warning: Could not initialize orchestrator: {e}")
-    print("Starting in basic mode...")
+    print("Starting in basic mode (keyword fallback only)...")
     orchestrator = None
     ORCHESTRATOR_READY = False
 
@@ -37,10 +38,15 @@ class EmailClassificationRequest(BaseModel):
     user_id: Optional[str] = "default"
 
 
+class Prediction(BaseModel):
+    category: str
+    confidence: float
+
+
 class EmailClassificationResponse(BaseModel):
     predicted_category: str
     confidence: float
-    all_predictions: List[Dict[str, float]]
+    all_predictions: List[Prediction]
     model_used: str
     escalated: bool
     energy_metrics: Dict[str, Any]
@@ -105,7 +111,8 @@ def simple_classification(text: str) -> Dict[str, Any]:
                 "🔄 AI models are loading - please wait and try again"
             ]
         },
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "email_text": text
     }
 
 
@@ -181,6 +188,12 @@ def classify_email(request: EmailClassificationRequest):
             processing_time=processing_time,
             timestamp=result["timestamp"]
         )
+
+
+# Backward compatibility endpoint: old clients used /classify
+@app.post("/classify", response_model=EmailClassificationResponse)
+def classify_compat(request: EmailClassificationRequest):
+    return classify_email(request)
 
 
 # -------------------------
