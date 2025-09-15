@@ -1,7 +1,7 @@
 from pathlib import Path
 from transformers import pipeline
 from codecarbon import EmissionsTracker
-from .config import LIGHT_MODEL, HEAVY_MODEL, SAMPLES_PATH
+from .config import LIGHT_MODEL, HEAVY_MODEL, EMAIL_SAMPLES_PATH as SAMPLES_PATH
 
 def load_samples():
     """
