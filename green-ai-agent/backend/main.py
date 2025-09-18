@@ -10,6 +10,8 @@ from datetime import datetime
 # Absolute imports for backend modules
 from backend.config import DB_PATH, EMAIL_CATEGORIES
 
+from backend.config_prod import MAX_EMAIL_LENGTH  # NEW (or from backend.config if you move it there)
+
 # Initialize the intelligent agent (with error handling)
 try:
     # Import inside try so missing module doesn't crash startup
@@ -47,6 +49,7 @@ class EmailClassificationResponse(BaseModel):
     all_predictions: List[Prediction]
     model_used: str
     escalated: bool
+    escalation_attempted: Optional[bool] = False
     energy_metrics: Dict[str, Any]
     ai_insights: Dict[str, Any]
     processing_time: float
@@ -82,6 +85,7 @@ def simple_classification(text: str) -> Dict[str, Any]:
         ],
         "model_used": "keyword_fallback",
         "escalated": False,
+        "escalation_attempted": False,
         "energy_metrics": {
             "co2_emissions_g": 0.001,
             "co2_emissions_kg": 0.000001,
@@ -91,6 +95,7 @@ def simple_classification(text: str) -> Dict[str, Any]:
             "cpu_utilization_end": 5.0,
             "gpu_metrics": {},
             "energy_efficiency_score": 0.1,
+            "co2_per_second": 0.01,
         },
         "ai_insights": {
             "environmental_impact": {
@@ -137,11 +142,10 @@ def classify_email(request: EmailClassificationRequest):
     if not request.text or not request.text.strip():
         raise HTTPException(status_code=400, detail="Email text is required")
 
-    if len(request.text) > 10000:
-        raise HTTPException(status_code=413, detail="Email text too long (>10000 chars)")
+    if len(request.text) > MAX_EMAIL_LENGTH:  # NEW
+        raise HTTPException(status_code=413, detail=f"Email text too long (>{MAX_EMAIL_LENGTH} chars)")
 
     start_time = time.time()
-
     try:
         if ORCHESTRATOR_READY and orchestrator:
             email_data = {
@@ -155,32 +159,35 @@ def classify_email(request: EmailClassificationRequest):
         else:
             result = simple_classification(request.text)
 
-        processing_time = time.time() - start_time
+        processing_time_api = time.time() - start_time
+        processing_time = float(
+        result.get("energy_metrics", {}).get("processing_time_seconds", processing_time_api)
+                )
         log_classification(result, processing_time)
 
         return EmailClassificationResponse(
             predicted_category=result["predicted_category"],
             confidence=result["confidence"],
-            all_predictions=result["all_predictions"],
+            all_predictions=[Prediction(**p) for p in result["all_predictions"]],
             model_used=result["model_used"],
             escalated=result["escalated"],
+            escalation_attempted=result.get("escalation_attempted", False),  # NEW
             energy_metrics=result["energy_metrics"],
             ai_insights=result["ai_insights"],
             processing_time=processing_time,
             timestamp=result["timestamp"],
         )
-
     except Exception as e:
         print(f"Classification error: {e}")
         result = simple_classification(request.text)
         processing_time = time.time() - start_time
-
         return EmailClassificationResponse(
             predicted_category=result["predicted_category"],
             confidence=result["confidence"],
-            all_predictions=result["all_predictions"],
+            all_predictions=[Prediction(**p) for p in result["all_predictions"]],
             model_used="fallback_error",
             escalated=False,
+            escalation_attempted=False,
             energy_metrics=result["energy_metrics"],
             ai_insights=result["ai_insights"],
             processing_time=processing_time,
@@ -197,28 +204,55 @@ def classify_compat(request: EmailClassificationRequest):
 # -------------------------
 # DB Logging
 # -------------------------
+# def log_classification(result: Dict, processing_time: float):
+#     try:
+#         with sqlite3.connect(DB_PATH) as conn:
+#             email_hash = hashlib.sha256(result.get("email_text", "unknown").encode()).hexdigest()[:16]
+
+#             conn.execute(
+#                 """
+#                 INSERT INTO email_classifications 
+#                 (timestamp, email_hash, predicted_category, confidence, model_used, 
+#                  escalated, co2_emissions_g, processing_time, energy_efficiency_score)
+#                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+#             """,
+#                 (
+#                     result["timestamp"],
+#                     email_hash,
+#                     result["predicted_category"],
+#                     result["confidence"],
+#                     result["model_used"],
+#                     result["escalated"],
+#                     result["energy_metrics"]["co2_emissions_g"],
+#                     processing_time,
+#                     result["energy_metrics"]["energy_efficiency_score"],
+#                 ),
+#             )
+#     except Exception as e:
+#         print(f"Database logging error: {e}")
 def log_classification(result: Dict, processing_time: float):
     try:
         with sqlite3.connect(DB_PATH) as conn:
             email_hash = hashlib.sha256(result.get("email_text", "unknown").encode()).hexdigest()[:16]
-
             conn.execute(
                 """
-                INSERT INTO email_classifications 
-                (timestamp, email_hash, predicted_category, confidence, model_used, 
-                 escalated, co2_emissions_g, processing_time, energy_efficiency_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+                INSERT INTO email_classifications
+                (timestamp, email_hash, predicted_category, confidence, model_used,
+                 escalated, co2_emissions_g, processing_time, energy_efficiency_score, escalation_attempted, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     result["timestamp"],
                     email_hash,
                     result["predicted_category"],
                     result["confidence"],
                     result["model_used"],
-                    result["escalated"],
+                    int(bool(result["escalated"])),
                     result["energy_metrics"]["co2_emissions_g"],
                     processing_time,
-                    result["energy_metrics"]["energy_efficiency_score"],
+                    result["energy_metrics"].get("co2_per_second", 0.0),
+                    int(bool(result.get("escalation_attempted", False))),
+                    result.get("user_id", "anonymous"),
                 ),
             )
     except Exception as e:
@@ -311,7 +345,8 @@ def recent_runs(limit: Optional[int] = 50):
             cursor.execute(
                 """
                 SELECT id, timestamp, email_hash, predicted_category, confidence, 
-                       model_used, escalated, co2_emissions_g, processing_time
+                       model_used, escalated, co2_emissions_g, processing_time,
+                       escalation_attempted, user_id
                 FROM email_classifications 
                 ORDER BY id DESC 
                 LIMIT ?
@@ -335,6 +370,8 @@ def recent_runs(limit: Optional[int] = 50):
                         "escalated": bool(row[6]),
                         "co2_g": float(row[7]),
                         "processing_time": float(row[8]),
+                        "escalation_attempted": bool(row[9]),   # <-- ADD
+                        "user_id": row[10],
                     }
                 )
 
@@ -415,7 +452,9 @@ def init_email_db():
                     escalated BOOLEAN NOT NULL,
                     co2_emissions_g REAL NOT NULL,
                     processing_time REAL NOT NULL,
-                    energy_efficiency_score REAL NOT NULL
+                    energy_efficiency_score REAL NOT NULL,
+                    escalation_attempted BOOLEAN NOT NULL DEFAULT 0,   -- <-- ADD
+                    user_id TEXT DEFAULT 'anonymous'  
                 )
             """
             )
